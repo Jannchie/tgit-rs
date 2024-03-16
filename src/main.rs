@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::Result;
 use git2::Repository;
+use inquire::{Confirm, Select};
 use regex::Regex;
 
 use serde_json::Value;
@@ -210,33 +211,7 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
                 if should_summary {
                     should_summary = false;
                     // 处理作者信息
-                    for (_, commits) in &changelog_unit.commit_map {
-                        for commit in commits {
-                            for author in &commit.authors {
-                                if changelog_unit
-                                    .contributors
-                                    .contains_key(author.mail.as_str())
-                                {
-                                    continue;
-                                }
-                                let username = mail_to_login.get(author.mail.as_str());
-                                let username = match username {
-                                    Some(username) => username.to_string(),
-                                    None => "".to_string(),
-                                };
-                                let author = Author {
-                                    name: author.name.to_string(),
-                                    mail: author.mail.to_string(),
-                                    username,
-                                };
-                                changelog_unit
-                                    .contributors
-                                    .insert(author.mail.to_string(), author);
-                            }
-                        }
-                    }
-                    let unit = changelog_unit.clone();
-                    changelog_units.push(unit);
+                    push_changelog_unit(&mut changelog_unit, &mail_to_login, &mut changelog_units);
                     if idx < range.len() - 2 {
                         idx += 1;
                         to_commit = range[idx].clone();
@@ -324,8 +299,7 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         if should_summary {
-            let unit = changelog_unit.clone();
-            changelog_units.push(unit);
+            push_changelog_unit(&mut changelog_unit, &mail_to_login, &mut changelog_units);
         }
     } else {
         // 使用本地的 git 信息遍历
@@ -360,13 +334,53 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
             changelog_unit.contributors,
         );
         changelog_all.push_str(changelog.as_str());
-        println!("{}", changelog);
+        let should_print = Confirm::new("Do you want to print the changelog?")
+            .with_default(true)
+            .prompt()?;
+        println!();
+        if should_print {
+            println!("{}", changelog);
+        }
     }
     if false {
         // 如果要求生成或更新 changelog file
         generate_or_update_changelog_file(path, changelog_all)?;
     }
     Result::Ok(())
+}
+
+fn push_changelog_unit<'a>(
+    changelog_unit: &mut ChangelogUnit<'a>,
+    mail_to_login: &HashMap<String, String>,
+    changelog_units: &mut Vec<ChangelogUnit<'a>>,
+) {
+    for (_, commits) in &changelog_unit.commit_map {
+        for commit in commits {
+            for author in &commit.authors {
+                if changelog_unit
+                    .contributors
+                    .contains_key(author.mail.as_str())
+                {
+                    continue;
+                }
+                let username = mail_to_login.get(author.mail.as_str());
+                let username = match username {
+                    Some(username) => username.to_string(),
+                    None => "".to_string(),
+                };
+                let author = Author {
+                    name: author.name.to_string(),
+                    mail: author.mail.to_string(),
+                    username,
+                };
+                changelog_unit
+                    .contributors
+                    .insert(author.mail.to_string(), author);
+            }
+        }
+    }
+    let unit = changelog_unit.clone();
+    changelog_units.push(unit);
 }
 
 fn generate_or_update_changelog_file(
@@ -421,18 +435,54 @@ fn get_name(
     } else if from_name == from_id_7 && to_name == to_id_7 {
         // 从某个固定的 tag 开始
         let from_version = semver::Version::parse("0.0.0").unwrap();
-        let mut to_version = from_version.clone();
+        let to_version = from_version.clone();
+
+        let mut default_bump_type = "patch";
+        let mut start_cursor = 2;
         if has_breaking {
-            to_version.major += 1;
-            to_version.minor = 0;
-            to_version.patch = 0;
+            default_bump_type = "major";
+            start_cursor = 0;
         } else if commit_map.get("feat").is_some() {
-            to_version.minor += 1;
-            to_version.patch = 0
-        } else {
-            to_version.patch += 1;
+            default_bump_type = "minor";
+            start_cursor = 1;
         }
-        to_version.pre = semver::Prerelease::EMPTY;
+
+        // TODO: 考虑 pre-release 和 build metadata
+        let mut to_major_version = to_version.clone();
+        to_major_version.pre = semver::Prerelease::EMPTY;
+        to_major_version.major += 1;
+        to_major_version.minor = 0;
+        to_major_version.patch = 0;
+
+        let mut to_minor_version = to_version.clone();
+        to_minor_version.pre = semver::Prerelease::EMPTY;
+        to_minor_version.minor += 1;
+        to_minor_version.patch = 0;
+
+        let mut to_patch_version = to_version.clone();
+        to_patch_version.pre = semver::Prerelease::EMPTY;
+        to_patch_version.patch += 1;
+
+        let major_option = format!("major ({})", to_major_version);
+        let minor_option = format!("minor ({})", to_minor_version);
+        let patch_option = format!("patch ({})", to_patch_version);
+
+        let ans = Select::new(
+            format!("Select the next version. (current version: {})", to_version).as_str(),
+            vec![major_option, minor_option, patch_option],
+        )
+        .with_starting_cursor(start_cursor)
+        .prompt();
+        let ans = match ans {
+            Ok(ans) => ans,
+            Err(_) => default_bump_type.to_string(),
+        };
+        let to_version = match ans {
+            _ if ans.starts_with("major") => to_major_version,
+            _ if ans.starts_with("minor") => to_minor_version,
+            _ if ans.starts_with("patch") => to_patch_version,
+            _ => to_version,
+        };
         to_name = format!("{}{}", prefix, to_version);
     }
     let to_name = to_name;
