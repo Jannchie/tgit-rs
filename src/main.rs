@@ -5,7 +5,6 @@ use std::{
 };
 
 use anyhow::Result;
-use chrono::DateTime;
 use git2::Repository;
 use regex::Regex;
 
@@ -187,7 +186,7 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
         let mut should_summary = false;
         for page in 1.. {
             // 如果本地安装了 gh，则使用 gh 获取 commit。这样可以不用配置 token。
-            let mut gh = std::process::Command::new("gh")
+            let gh = std::process::Command::new("gh")
                 .arg("api")
                 .arg(format!(
                     "repos/{}/{}/commits?per_page=100&page={}&sha={}",
@@ -273,7 +272,6 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
                     Some(val) => val.get("login").unwrap().as_str().unwrap(),
                     None => "",
                 };
-                let committer_name = commit_committer.get("name").unwrap().as_str().unwrap();
                 let committer_mail = commit_committer.get("email").unwrap().as_str().unwrap();
                 mail_to_login.insert(committer_mail.to_string(), committer_login.to_string());
 
@@ -298,7 +296,7 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
                 let (scope, description, type_, is_breaking) =
                     match parse_first_line(message.lines().next().unwrap()) {
                         Ok(value) => value,
-                        Err(value) => continue,
+                        Err(_) => continue,
                     };
 
                 let commit = Commit::new(
@@ -339,14 +337,14 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
                 changelog_unit.to_commit.id()
             )
             .as_str(),
-        );
-        let (has_breaking, contributors, commit_map) = organize_commit(revwalk, &repo);
+        )?;
+        let (_, _, _) = organize_commit(revwalk, &repo);
     }
+    let mut changelog_all = "".to_string();
     for changelog_unit in changelog_units {
         let prefix = prefix.clone();
         let baseurl = baseurl.clone();
         let (from_name, to_name) = get_name(
-            &repo,
             &changelog_unit.from_commit,
             &changelog_unit.to_commit,
             prefix,
@@ -361,10 +359,13 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
             changelog_unit.commit_map,
             changelog_unit.contributors,
         );
+        changelog_all.push_str(changelog.as_str());
         println!("{}", changelog);
     }
-
-    // generate_or_update_changelog_file(path, changelog)?;
+    if false {
+        // 如果要求生成或更新 changelog file
+        generate_or_update_changelog_file(path, changelog_all)?;
+    }
     Result::Ok(())
 }
 
@@ -391,7 +392,6 @@ fn generate_or_update_changelog_file(
 }
 
 fn get_name(
-    repo: &Repository,
     from_commit: &git2::Commit<'_>,
     to_commit: &git2::Commit<'_>,
     prefix: String,
@@ -418,7 +418,7 @@ fn get_name(
     let mut to_name = to_tag.unwrap_or(&to_id_7).to_string();
     if from_name != from_id_7 && to_name != to_id_7 {
         // do noting
-    } else if (from_name == from_id_7 && to_name == to_id_7) {
+    } else if from_name == from_id_7 && to_name == to_id_7 {
         // 从某个固定的 tag 开始
         let from_version = semver::Version::parse("0.0.0").unwrap();
         let mut to_version = from_version.clone();
@@ -627,7 +627,7 @@ fn get_changelog_string(
     }
     changelog.push_str("\n### :busts_in_silhouette: Contributors\n\n");
     for (_, contributor) in &contributors {
-        if (contributor.username.is_empty()) {
+        if contributor.username.is_empty() {
             changelog.push_str(format!("- {} <{}>\n", contributor.name, contributor.mail).as_str());
         } else {
             changelog.push_str(
@@ -674,15 +674,12 @@ fn organize_commit(
         let id = id.unwrap();
         let git_commit = repo.find_commit(id).unwrap();
         let author = git_commit.author();
-        let time = git_commit.time().seconds() as i64 * 1_000_000;
-        let datetime = DateTime::from_timestamp_micros(time).unwrap();
         let commit = get_commit(&git_commit);
         let mail = author.email().unwrap();
-        let name = author.name().unwrap();
         if contributors.contains_key(mail) {
             continue;
         }
-        let name = fetch_github_username(mail, name);
+        let name = fetch_github_username(mail);
         if let Ok(name) = name {
             let author = Author {
                 name: author.name().unwrap().to_string(),
@@ -745,9 +742,9 @@ fn get_range<'a>(
 
 fn get_from_commit(repo: &Repository, from: Option<String>) -> git2::Commit<'_> {
     let mut revwalk = repo.revwalk().unwrap();
-    revwalk.push_head();
+    revwalk.push_head().unwrap();
 
-    let mut from_commit;
+    let from_commit;
     // 如果没有 from 参数，则获取最新的 tag。
     if from.is_none() {
         let mut latest_tag: Option<String> = None;
@@ -875,38 +872,7 @@ fn parse_author_from_line(line: &str) -> Option<Author> {
     Some(author)
 }
 
-fn get_from<'a>(repo: &'a Repository, args: &'a Options, tag: Option<String>) -> git2::Object<'a> {
-    let mut f = repo.revparse_ext("HEAD").unwrap();
-    let mut from = f.0;
-    let mut refs = f.1.unwrap();
-    if args.from.is_none() {
-        // 未指定 from
-        if let Some(tag) = tag {
-            // 存在 tag，则设为 from
-            let tag = tag;
-            let tag = repo.revparse_single(tag.as_str()).unwrap();
-            // from tag Object to Commit
-            let tag_commit = tag.as_commit().unwrap();
-        }
-    }
-    from
-}
-
-fn get_latest_tag(repo: &Repository) -> Option<String> {
-    let tags = repo.tag_names(None);
-    if tags.is_err() {
-        return None;
-    }
-    let tags = tags.unwrap();
-    if tags.len() > 0 {
-        let latest_tag = tags.get(tags.len() - 1);
-        Some(latest_tag.unwrap().to_string())
-    } else {
-        None
-    }
-}
-
-fn fetch_github_username(email: &str, name: &str) -> Result<String, Box<dyn std::error::Error>> {
+fn fetch_github_username(email: &str) -> Result<String, Box<dyn std::error::Error>> {
     let client = reqwest::blocking::Client::new();
     let url = format!("https://ungh.cc/users/find/{}", email);
     let response = client
