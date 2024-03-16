@@ -168,6 +168,8 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
         return Err("The repository has untracked files.".into());
     }
 
+    let mut using_emoji = false;
+
     let tags = list_tags(&repo);
     let (c2t, _) = get_commit_tag_map(&repo, &tags);
     let range = get_range(&repo, from, to, &c2t)?;
@@ -279,12 +281,14 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
                 }];
                 parse_author_from_body(message, &mut authors);
 
-                let (scope, description, type_, is_breaking) =
+                let (emoji, scope, description, type_, is_breaking) =
                     match parse_first_line(message.lines().next().unwrap()) {
                         Ok(value) => value,
                         Err(_) => continue,
                     };
-
+                if using_emoji == false && !emoji.is_empty() {
+                    using_emoji = true;
+                }
                 let commit = Commit::new(
                     sha.to_string(),
                     type_,
@@ -327,7 +331,7 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
         let (_, _, _) = organize_commit(revwalk, &repo);
     }
     let mut changelog_all = "".to_string();
-
+    let mut first_to_name = "".to_string();
     for changelog_unit in changelog_units {
         let prefix = prefix.clone();
         let baseurl = baseurl.clone();
@@ -339,6 +343,9 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
             &changelog_unit.commit_map,
             &c2t,
         );
+        if first_to_name.is_empty() {
+            first_to_name = to_name.clone();
+        }
         let changelog = get_changelog_string(
             baseurl,
             from_name,
@@ -349,6 +356,58 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
         changelog_all.push_str("\n");
         changelog_all.push_str(changelog.as_str());
     }
+
+    let should_bump = Confirm::new("Do you want to bump the version?")
+        .with_default(true)
+        .prompt()?;
+
+    // 更新 Cargo.toml
+    // TODO: package.json, pyproject.toml, setup.py, version.go 之类的文件
+    if should_bump {
+        update_version(path, &first_to_name, &prefix)?;
+    }
+
+    let should_commit_and_push = Confirm::new("Do you want to commit and push?")
+        .with_default(true)
+        .prompt()?;
+
+    if should_commit_and_push {
+        let mut add = std::process::Command::new("git");
+        add.arg("add").arg(".");
+        let output = add.output()?;
+        println!("{}", String::from_utf8_lossy(&output.stdout));
+
+        // commit and push
+        let mut commit = std::process::Command::new("git");
+        if using_emoji {
+            commit.arg("commit").arg("-am").arg(format!(
+                "{} release: bump version to {}",
+                ":bookmark:", first_to_name
+            ));
+        } else {
+            commit
+                .arg("commit")
+                .arg("-am")
+                .arg(format!("release: bump version to {}", first_to_name));
+        }
+
+        let output = commit.output()?;
+        println!("{}", String::from_utf8_lossy(&output.stdout));
+
+        // create tag
+        let mut tag = std::process::Command::new("git");
+        tag.arg("tag").arg(first_to_name);
+        let output = tag.output()?;
+        println!("{}", String::from_utf8_lossy(&output.stdout));
+
+        // push
+        let mut push = std::process::Command::new("git");
+        push.arg("push");
+        push.arg("origin").arg("HEAD").arg("--tags");
+        let output = push.output()?;
+        println!("{}", String::from_utf8_lossy(&output.stdout));
+    }
+
     let should_print = Confirm::new("Do you want to print the changelog?")
         .with_default(true)
         .prompt()?;
@@ -363,6 +422,35 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
     Result::Ok(())
 }
 
+fn update_version(
+    path: &std::path::Path,
+    version: &String,
+    prefix: &String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let version_without_prefix = version
+        .strip_prefix(prefix.as_str())
+        .unwrap_or(&version)
+        .to_string();
+    let cargo_toml_path = path.join("Cargo.toml");
+    if cargo_toml_path.exists() {
+        // read toml, update version, write toml
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .read(true)
+            .open(cargo_toml_path.as_path())?;
+        let mut content = String::new();
+        file.read_to_string(&mut content)?;
+        // 使用正则，匹配内容为 version = "0.1.0" 的行。匹配的行不能有任何其他内容。
+        let re = Regex::new(r#"(?m)^version = ".*"\n"#).unwrap();
+        let new_content = re.replace_all(
+            content.as_str(),
+            format!("version = \"{}\"\n", version_without_prefix).as_str(),
+        );
+        file.seek(std::io::SeekFrom::Start(0))?;
+        file.write_all(new_content.as_bytes())?;
+    }
+    Ok(())
+}
 fn push_changelog_unit<'a>(
     changelog_unit: &mut ChangelogUnit<'a>,
     mail_to_login: &HashMap<String, String>,
@@ -883,7 +971,7 @@ fn get_commit(commit: &git2::Commit) -> Option<Commit> {
         let body = body.unwrap();
         parse_author_from_body(body, &mut authors);
     }
-    let (scope, description, type_, is_breaking) = match parse_first_line(message) {
+    let (_, scope, description, type_, is_breaking) = match parse_first_line(message) {
         Ok(value) => value,
         Err(value) => return value,
     };
@@ -897,7 +985,9 @@ fn get_commit(commit: &git2::Commit) -> Option<Commit> {
     ))
 }
 
-fn parse_first_line(message: &str) -> Result<(String, String, String, bool), Option<Commit>> {
+fn parse_first_line(
+    message: &str,
+) -> Result<(String, String, String, String, bool), Option<Commit>> {
     let first_line_regex = regex::Regex::new(r#"(?P<emoji>:.+:|(\u{1F300}-\u{1F3FF})|(\u{1F400}-\u{1F64F})|[\u{2600}-\u{2B55}])?( *)?(?P<type>[a-z]+)(\((?P<scope>.+)\))?(?P<breaking>!)?: (?P<description>.+)"#).unwrap();
     let captures = first_line_regex.captures(message);
     if captures.is_none() {
@@ -917,8 +1007,12 @@ fn parse_first_line(message: &str) -> Result<(String, String, String, bool), Opt
         .name("breaking")
         .map_or("", |m| m.as_str())
         .to_string();
+    let emoji = captures
+        .name("emoji")
+        .map_or("", |m| m.as_str())
+        .to_string();
     let is_breaking = breaking == "!";
-    Ok((scope, description, type_, is_breaking))
+    Ok((emoji, scope, description, type_, is_breaking))
 }
 
 fn parse_author_from_body(body: &str, authors: &mut Vec<Author>) {
