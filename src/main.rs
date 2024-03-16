@@ -242,7 +242,7 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
 
                 // println!("{:?}", changelog_unit.to_commit);
                 // 如果当前的 to 是当前的 sha，则下一次遍历前需要 summary.
-                if sha == changelog_unit.to_commit.id().to_string() {
+                if sha == changelog_unit.from_commit.id().to_string() {
                     // println!("summary: {}", sha);
                     should_summary = true;
                 }
@@ -327,33 +327,34 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
         let (_, _, _) = organize_commit(revwalk, &repo);
     }
     let mut changelog_all = "".to_string();
+
+    for changelog_unit in changelog_units {
+        let prefix = prefix.clone();
+        let baseurl = baseurl.clone();
+        let (from_name, to_name) = get_name(
+            &changelog_unit.from_commit,
+            &changelog_unit.to_commit,
+            prefix,
+            changelog_unit.has_breaking,
+            &changelog_unit.commit_map,
+            &c2t,
+        );
+        let changelog = get_changelog_string(
+            baseurl,
+            from_name,
+            to_name,
+            changelog_unit.commit_map,
+            changelog_unit.contributors,
+        );
+        changelog_all.push_str("\n");
+        changelog_all.push_str(changelog.as_str());
+    }
     let should_print = Confirm::new("Do you want to print the changelog?")
         .with_default(true)
         .prompt()?;
     println!();
     if should_print {
-        for changelog_unit in changelog_units {
-            let prefix = prefix.clone();
-            let baseurl = baseurl.clone();
-            let (from_name, to_name) = get_name(
-                &changelog_unit.from_commit,
-                &changelog_unit.to_commit,
-                prefix,
-                changelog_unit.has_breaking,
-                &changelog_unit.commit_map,
-                &c2t,
-            );
-            let changelog = get_changelog_string(
-                baseurl,
-                from_name,
-                to_name,
-                changelog_unit.commit_map,
-                changelog_unit.contributors,
-            );
-            changelog_all.push_str(changelog.as_str());
-
-            println!("{}", changelog);
-        }
+        println!("{}", changelog_all);
     }
     if false {
         // 如果要求生成或更新 changelog file
@@ -788,10 +789,9 @@ fn get_range<'a>(
     c2t: &'a HashMap<String, String>,
 ) -> Result<Vec<git2::Commit<'a>>, Box<dyn std::error::Error>> {
     let from_commit = get_from_commit(repo, from);
-    let to_obj = repo.revparse_single(to.as_str()).unwrap();
-    let to_commit = to_obj.as_commit().unwrap().clone();
-    // println!("from: {:?}", from_commit);
-    // println!("to: {:?}", to_commit);
+    let to_commit = get_from_commit(repo, Some(to.clone()));
+    println!("from: {:?}", from_commit);
+    println!("to: {:?}", to_commit);
     if from_commit.id() == to_commit.id() {
         return Err("No commits between from and to.".into());
     }
