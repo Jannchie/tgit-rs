@@ -1,7 +1,5 @@
-#![allow(unused)]
-
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     io::{Read, Seek, Write},
     rc::Rc,
 };
@@ -10,7 +8,6 @@ use anyhow::Result;
 use chrono::DateTime;
 use git2::Repository;
 use regex::Regex;
-use reqwest::blocking::Client;
 
 use serde_json::Value;
 use structopt::StructOpt;
@@ -62,7 +59,6 @@ struct Author {
 #[derive(Debug, Clone)]
 struct Commit {
     hash: String,
-    emoji: String,
     type_: String,
     scope: String,
     description: String,
@@ -73,7 +69,6 @@ struct Commit {
 impl Commit {
     fn new(
         hash: String,
-        emoji: String,
         type_: String,
         scope: String,
         description: String,
@@ -82,7 +77,6 @@ impl Commit {
     ) -> Self {
         Self {
             hash,
-            emoji,
             type_,
             scope,
             description,
@@ -133,15 +127,14 @@ impl<'a> Clone for ChangelogUnit<'a> {
 
 fn main() {
     let args = Options::from_args();
-    if let Err(err) = gitt(args) {
+    if let Err(err) = tgit(args) {
         eprintln!("Error: {}", err);
         std::process::exit(1);
     }
 }
 
-fn gitt(args: Options) -> Result<(), Box<dyn std::error::Error>> {
+fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
     let path = args.path.as_path();
-    let path_str = args.path.as_os_str();
     let from = args.from;
     let remote = args.remote;
     let to = args.to;
@@ -165,7 +158,7 @@ fn gitt(args: Options) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let tags = list_tags(&repo);
-    let (c2t, t2c) = get_commit_tag_map(&repo, &tags);
+    let (c2t, _) = get_commit_tag_map(&repo, &tags);
     let range = get_range(&repo, from, to, &c2t)?;
     let host_scope_repo = get_host_scope_repo(&repo, remote.as_str());
     let baseurl = host_scope_repo
@@ -184,9 +177,6 @@ fn gitt(args: Options) -> Result<(), Box<dyn std::error::Error>> {
     let mut changelog_units = Vec::<ChangelogUnit>::new();
     let mut changelog_unit =
         ChangelogUnit::new(Rc::new(from_commit.clone()), Rc::new(to_commit.clone()));
-    println!("range {:?}", range);
-    println!("{:?}", changelog_unit.from_commit);
-    println!("{:?}", changelog_unit.to_commit);
     if host.contains("github") {
         // 如果仓库和 github 有关，则使用 github 的数据，因为 github 拥有用户信息。
         // eg. https://api.github.com/repos/Jannchie/bumpp/commits?per_page=100&page=1&sha=5d8d761ec9554eceb448e3f62f1d9f1d1841a09f
@@ -305,7 +295,7 @@ fn gitt(args: Options) -> Result<(), Box<dyn std::error::Error>> {
                 }];
                 parse_author_from_body(message, &mut authors);
 
-                let (emoji, scope, description, type_, is_breaking) =
+                let (scope, description, type_, is_breaking) =
                     match parse_first_line(message.lines().next().unwrap()) {
                         Ok(value) => value,
                         Err(value) => continue,
@@ -313,7 +303,6 @@ fn gitt(args: Options) -> Result<(), Box<dyn std::error::Error>> {
 
                 let commit = Commit::new(
                     sha.to_string(),
-                    emoji,
                     type_,
                     scope,
                     description,
@@ -336,6 +325,10 @@ fn gitt(args: Options) -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
         }
+        if should_summary {
+            let unit = changelog_unit.clone();
+            changelog_units.push(unit);
+        }
     } else {
         // 使用本地的 git 信息遍历
         let mut revwalk = repo.revwalk().unwrap();
@@ -349,7 +342,6 @@ fn gitt(args: Options) -> Result<(), Box<dyn std::error::Error>> {
         );
         let (has_breaking, contributors, commit_map) = organize_commit(revwalk, &repo);
     }
-
     for changelog_unit in changelog_units {
         let prefix = prefix.clone();
         let baseurl = baseurl.clone();
@@ -577,10 +569,10 @@ fn get_changelog_string(
         if commits.is_empty() {
             continue;
         }
-        if (i == 0 && commits.iter().filter(|commit| commit.is_breaking).count() == 0) {
+        if i == 0 && commits.iter().filter(|commit| commit.is_breaking).count() == 0 {
             continue;
         }
-        if (i == 1 && commits.iter().filter(|commit| !commit.is_breaking).count() == 0) {
+        if i == 1 && commits.iter().filter(|commit| !commit.is_breaking).count() == 0 {
             continue;
         }
         changelog.push_str(format!("\n### {}\n\n", name_map[i]).as_str());
@@ -595,7 +587,7 @@ fn get_changelog_string(
                 if i == 0 {
                     by.push_str("by ");
                 }
-                if (commit.authors.len() == 1) {
+                if commit.authors.len() == 1 {
                     by.push_str(format!("{}", author.name).as_str());
                 } else {
                     if i == commit.authors.len() - 1 {
@@ -719,34 +711,6 @@ fn organize_commit(
     (has_breaking, contributors, commit_map)
 }
 
-fn get_repo_contributors_set(scope: &str, repo: &str) -> HashSet<String> {
-    let url = format!("https://ungh.cc/repos/{}/{}/contributors", scope, repo);
-    let client = Client::new();
-    let response = client.get(url).send().unwrap();
-    let body = response.text().unwrap();
-    let data: Value = serde_json::from_str(&body).unwrap();
-    let contributors = data.get("contributors").unwrap();
-    let mut set = HashSet::new();
-    for contributor in contributors.as_array().unwrap() {
-        let username = contributor.get("username").unwrap().as_str().unwrap();
-        set.insert(username.to_string());
-    }
-    set
-}
-
-fn get_most_similar_name(name: &str, set: &HashSet<String>) -> String {
-    let mut max = 0f64;
-    let mut most_similar = "".to_string();
-    for item in set {
-        let similarity = strsim::jaro(name, item);
-        if similarity > max {
-            max = similarity;
-            most_similar = item.to_string();
-        }
-    }
-    most_similar
-}
-
 fn get_range<'a>(
     repo: &'a Repository,
     from: Option<String>,
@@ -756,13 +720,12 @@ fn get_range<'a>(
     let from_commit = get_from_commit(repo, from);
     let to_obj = repo.revparse_single(to.as_str()).unwrap();
     let to_commit = to_obj.as_commit().unwrap().clone();
-
     if from_commit.id() == to_commit.id() {
         return Err("No commits between from and to.".into());
     }
 
     let mut walker = repo.revwalk().unwrap();
-    walker.push_range(format!("{}..{}", from_commit.id(), to_commit.id()).as_str());
+    walker.push_range(format!("{}..{}", from_commit.id(), to_commit.id()).as_str())?;
 
     let mut commits = Vec::new();
     for id in walker {
@@ -773,6 +736,10 @@ fn get_range<'a>(
         }
     }
     commits.push(from_commit);
+    let to_tag = c2t.get(to_commit.id().to_string().as_str());
+    if None == to_tag {
+        commits.push(to_commit);
+    }
     Ok(commits)
 }
 
@@ -789,6 +756,7 @@ fn get_from_commit(repo: &Repository, from: Option<String>) -> git2::Commit<'_> 
             let commit = commit.unwrap();
             let commit = repo.find_commit(commit).unwrap();
             let tag = from_commit_get_tag(repo, &commit);
+            latest_commit = commit;
             if tag.is_none() {
                 continue;
             }
@@ -796,7 +764,6 @@ fn get_from_commit(repo: &Repository, from: Option<String>) -> git2::Commit<'_> 
                 latest_tag = Some(tag);
                 break;
             }
-            latest_commit = commit;
         }
         if latest_tag.is_none() {
             from_commit = latest_commit;
@@ -842,14 +809,12 @@ fn get_commit(commit: &git2::Commit) -> Option<Commit> {
         let body = body.unwrap();
         parse_author_from_body(body, &mut authors);
     }
-    let (emoji, scope, description, type_, is_breaking) = match parse_first_line(message) {
+    let (scope, description, type_, is_breaking) = match parse_first_line(message) {
         Ok(value) => value,
         Err(value) => return value,
     };
-    let desc = commit.summary().unwrap().to_string();
     Some(Commit::new(
         hash,
-        emoji,
         type_,
         scope,
         description,
@@ -858,19 +823,13 @@ fn get_commit(commit: &git2::Commit) -> Option<Commit> {
     ))
 }
 
-fn parse_first_line(
-    message: &str,
-) -> Result<(String, String, String, String, bool), Option<Commit>> {
+fn parse_first_line(message: &str) -> Result<(String, String, String, bool), Option<Commit>> {
     let first_line_regex = regex::Regex::new(r#"(?P<emoji>:.+:|(\u{1F300}-\u{1F3FF})|(\u{1F400}-\u{1F64F})|[\u{2600}-\u{2B55}])?( *)?(?P<type>[a-z]+)(\((?P<scope>.+)\))?(?P<breaking>!)?: (?P<description>.+)"#).unwrap();
     let captures = first_line_regex.captures(message);
     if captures.is_none() {
         return Err(None);
     }
     let captures = captures.unwrap();
-    let emoji = captures
-        .name("emoji")
-        .map_or("", |m| m.as_str())
-        .to_string();
     let scope = captures
         .name("scope")
         .map_or("", |m| m.as_str())
@@ -885,7 +844,7 @@ fn parse_first_line(
         .map_or("", |m| m.as_str())
         .to_string();
     let is_breaking = breaking == "!";
-    Ok((emoji, scope, description, type_, is_breaking))
+    Ok((scope, description, type_, is_breaking))
 }
 
 fn parse_author_from_body(body: &str, authors: &mut Vec<Author>) {
@@ -976,7 +935,7 @@ mod gitt_tests {
     use super::*;
     #[test]
     fn test_empty() {
-        if let Err(err) = gitt(Options {
+        if let Err(err) = tgit(Options {
             from: None,
             to: "HEAD".to_string(),
             path: std::path::PathBuf::from("./repo/empty"),
@@ -989,7 +948,7 @@ mod gitt_tests {
 
     #[test]
     fn test_has_untracked() {
-        if let Err(err) = gitt(Options {
+        if let Err(err) = tgit(Options {
             from: None,
             to: "HEAD".to_string(),
             path: std::path::PathBuf::from("./repo/has_untracked"),
@@ -1002,7 +961,7 @@ mod gitt_tests {
 
     #[test]
     fn test_no_tag() {
-        if let Err(err) = gitt(Options {
+        if let Err(err) = tgit(Options {
             from: None,
             to: "HEAD".to_string(),
             path: std::path::PathBuf::from("./repo/no_tag"),
@@ -1015,7 +974,7 @@ mod gitt_tests {
 
     #[test]
     fn test_with_tag() {
-        if let Err(_err) = gitt(Options {
+        if let Err(_err) = tgit(Options {
             from: None,
             to: "HEAD".to_string(),
             path: std::path::PathBuf::from("./repo/with_tag"),
