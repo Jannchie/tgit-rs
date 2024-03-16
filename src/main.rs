@@ -56,6 +56,16 @@ struct Author {
     username: String,
 }
 
+impl Author {
+    fn get_display(&self) -> String {
+        if self.username.is_empty() {
+            self.name.clone()
+        } else {
+            format!("@{}", self.username)
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Commit {
     hash: String,
@@ -634,20 +644,21 @@ fn get_changelog_string(
             let mut by = String::from("");
             // by 信息的格式类似：by author1, author2, and author3
             for (i, author) in commit.authors.iter().enumerate() {
+                let author_display = author.get_display();
                 if i == 0 {
                     by.push_str("by ");
                 }
                 if commit.authors.len() == 1 {
-                    by.push_str(format!("{}", author.name).as_str());
+                    by.push_str(format!("{}", author_display).as_str());
                 } else {
                     if i == commit.authors.len() - 1 {
-                        by.push_str(format!("and {}", author.name).as_str());
+                        by.push_str(format!("and {}", author_display).as_str());
                     } else {
                         // 如果是倒数第二个，则不用添加逗号
                         if i == commit.authors.len() - 2 {
-                            by.push_str(format!("{} ", author.name).as_str());
+                            by.push_str(format!("{} ", author_display).as_str());
                         } else {
-                            by.push_str(format!("{}, ", author.name).as_str());
+                            by.push_str(format!("{}, ", author_display).as_str());
                         }
                     }
                 }
