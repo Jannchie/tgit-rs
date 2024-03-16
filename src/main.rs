@@ -146,10 +146,11 @@ fn main() {
 fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
     let path = args.path.as_path();
     let from = args.from;
-    let remote = args.remote;
     let to = args.to;
+    let remote = args.remote;
     let prefix = args.prefix;
-
+    // println!("from: {:?}", from);
+    // println!("to: {}", to);
     let repo = git2::Repository::open(path)?;
 
     if repo.is_empty().unwrap() {
@@ -180,10 +181,9 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
     let (host, scope_name, repo_name) =
         host_scope_repo.unwrap_or(("".to_string(), "".to_string(), "".to_string()));
 
-    let mut idx = 0;
-    let mut to_commit = range[idx].clone();
-    let mut from_commit = range[idx + 1].clone();
-
+    let mut idx = range.len() - 2;
+    let mut from_commit = range[idx].clone();
+    let mut to_commit = range[idx + 1].clone();
     let mut changelog_units = Vec::<ChangelogUnit>::new();
     let mut changelog_unit =
         ChangelogUnit::new(Rc::new(from_commit.clone()), Rc::new(to_commit.clone()));
@@ -204,7 +204,7 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
                     scope_name,
                     repo_name,
                     page,
-                    range.first().unwrap().id(),
+                    range.last().unwrap().id(),
                 ))
                 .output()
                 .unwrap();
@@ -222,10 +222,10 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
                     should_summary = false;
                     // 处理作者信息
                     push_changelog_unit(&mut changelog_unit, &mail_to_login, &mut changelog_units);
-                    if idx < range.len() - 2 {
-                        idx += 1;
-                        to_commit = range[idx].clone();
-                        from_commit = range[idx + 1].clone();
+                    if idx > 0 {
+                        idx -= 1;
+                        from_commit = range[idx].clone();
+                        to_commit = range[idx + 1].clone();
                         changelog_unit =
                             ChangelogUnit::new(Rc::new(from_commit), Rc::new(to_commit));
                     }
@@ -243,10 +243,11 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
                 // println!("{:?}", changelog_unit.to_commit);
                 // 如果当前的 to 是当前的 sha，则下一次遍历前需要 summary.
                 if sha == changelog_unit.to_commit.id().to_string() {
+                    // println!("summary: {}", sha);
                     should_summary = true;
                 }
-
-                if sha == range.last().unwrap().id().to_string() {
+                // println!("sha: {}", sha);
+                if sha == range.first().unwrap().id().to_string() {
                     over = true;
                 }
 
@@ -308,6 +309,7 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
         }
+        // println!("{:?}", changelog_unit);
         if should_summary {
             push_changelog_unit(&mut changelog_unit, &mail_to_login, &mut changelog_units);
         }
@@ -325,30 +327,31 @@ fn tgit(args: Options) -> Result<(), Box<dyn std::error::Error>> {
         let (_, _, _) = organize_commit(revwalk, &repo);
     }
     let mut changelog_all = "".to_string();
-    for changelog_unit in changelog_units {
-        let prefix = prefix.clone();
-        let baseurl = baseurl.clone();
-        let (from_name, to_name) = get_name(
-            &changelog_unit.from_commit,
-            &changelog_unit.to_commit,
-            prefix,
-            changelog_unit.has_breaking,
-            &changelog_unit.commit_map,
-            &c2t,
-        );
-        let changelog = get_changelog_string(
-            baseurl,
-            to_name,
-            from_name,
-            changelog_unit.commit_map,
-            changelog_unit.contributors,
-        );
-        changelog_all.push_str(changelog.as_str());
-        let should_print = Confirm::new("Do you want to print the changelog?")
-            .with_default(true)
-            .prompt()?;
-        println!();
-        if should_print {
+    let should_print = Confirm::new("Do you want to print the changelog?")
+        .with_default(true)
+        .prompt()?;
+    println!();
+    if should_print {
+        for changelog_unit in changelog_units {
+            let prefix = prefix.clone();
+            let baseurl = baseurl.clone();
+            let (from_name, to_name) = get_name(
+                &changelog_unit.from_commit,
+                &changelog_unit.to_commit,
+                prefix,
+                changelog_unit.has_breaking,
+                &changelog_unit.commit_map,
+                &c2t,
+            );
+            let changelog = get_changelog_string(
+                baseurl,
+                from_name,
+                to_name,
+                changelog_unit.commit_map,
+                changelog_unit.contributors,
+            );
+            changelog_all.push_str(changelog.as_str());
+
             println!("{}", changelog);
         }
     }
@@ -390,6 +393,7 @@ fn push_changelog_unit<'a>(
         }
     }
     let unit = changelog_unit.clone();
+    // println!("push: {:?}", unit);
     changelog_units.push(unit);
 }
 
@@ -440,62 +444,70 @@ fn get_name(
 
     let from_name = from_tag.unwrap_or(&from_id_7).to_string();
     let mut to_name = to_tag.unwrap_or(&to_id_7).to_string();
-    if from_name != from_id_7 && to_name != to_id_7 {
-        // do noting
-    } else if from_name == from_id_7 && to_name == to_id_7 {
-        // 从某个固定的 tag 开始
-        let from_version = semver::Version::parse("0.0.0").unwrap();
-        let to_version = from_version.clone();
 
-        let mut default_bump_type = "patch";
-        let mut start_cursor = 2;
-        if has_breaking {
-            default_bump_type = "major";
-            start_cursor = 0;
-        } else if commit_map.get("feat").is_some() {
-            default_bump_type = "minor";
-            start_cursor = 1;
-        }
-
-        // TODO: 考虑 pre-release 和 build metadata
-        let mut to_major_version = to_version.clone();
-        to_major_version.pre = semver::Prerelease::EMPTY;
-        to_major_version.major += 1;
-        to_major_version.minor = 0;
-        to_major_version.patch = 0;
-
-        let mut to_minor_version = to_version.clone();
-        to_minor_version.pre = semver::Prerelease::EMPTY;
-        to_minor_version.minor += 1;
-        to_minor_version.patch = 0;
-
-        let mut to_patch_version = to_version.clone();
-        to_patch_version.pre = semver::Prerelease::EMPTY;
-        to_patch_version.patch += 1;
-
-        let major_option = format!("major ({})", to_major_version);
-        let minor_option = format!("minor ({})", to_minor_version);
-        let patch_option = format!("patch ({})", to_patch_version);
-
-        let ans = Select::new(
-            format!("Select the next version. (current version: {})", to_version).as_str(),
-            vec![major_option, minor_option, patch_option],
-        )
-        .with_starting_cursor(start_cursor)
-        .prompt();
-        let ans = match ans {
-            Ok(ans) => ans,
-            Err(_) => default_bump_type.to_string(),
-        };
-        let to_version = match ans {
-            _ if ans.starts_with("major") => to_major_version,
-            _ if ans.starts_with("minor") => to_minor_version,
-            _ if ans.starts_with("patch") => to_patch_version,
-            _ => to_version,
-        };
-        to_name = format!("{}{}", prefix, to_version);
+    if to_name != to_id_7 {
+        // 如果 to_name 是 tag，则直接返回
+        return (from_name, to_name);
     }
+    let mut from_version = semver::Version::parse("0.0.0").unwrap();
+    if from_name != from_id_7 {
+        // 如果 from_name 是 tag，则 from_version = from_name
+        from_version =
+            semver::Version::parse(from_name.as_str().strip_prefix(prefix.as_str()).unwrap())
+                .unwrap();
+    }
+
+    let to_version = from_version.clone();
+    let mut default_bump_type = "patch";
+    let mut start_cursor = 2;
+    if has_breaking {
+        default_bump_type = "major";
+        start_cursor = 0;
+    } else if commit_map.get("feat").is_some() {
+        default_bump_type = "minor";
+        start_cursor = 1;
+    }
+
+    // TODO: 考虑 pre-release 和 build metadata
+    let mut to_major_version = to_version.clone();
+    to_major_version.pre = semver::Prerelease::EMPTY;
+    to_major_version.major += 1;
+    to_major_version.minor = 0;
+    to_major_version.patch = 0;
+
+    let mut to_minor_version = to_version.clone();
+    to_minor_version.pre = semver::Prerelease::EMPTY;
+    to_minor_version.minor += 1;
+    to_minor_version.patch = 0;
+
+    let mut to_patch_version = to_version.clone();
+    to_patch_version.pre = semver::Prerelease::EMPTY;
+    to_patch_version.patch += 1;
+
+    let major_option = format!("major ({})", to_major_version);
+    let minor_option = format!("minor ({})", to_minor_version);
+    let patch_option = format!("patch ({})", to_patch_version);
+
+    let ans = Select::new(
+        format!("Select the next version. (current version: {})", to_version).as_str(),
+        vec![major_option, minor_option, patch_option],
+    )
+    .with_starting_cursor(start_cursor)
+    .prompt();
+    let ans = match ans {
+        Ok(ans) => ans,
+        Err(_) => default_bump_type.to_string(),
+    };
+    let to_version = match ans {
+        _ if ans.starts_with("major") => to_major_version,
+        _ if ans.starts_with("minor") => to_minor_version,
+        _ if ans.starts_with("patch") => to_patch_version,
+        _ => to_version,
+    };
+    to_name = format!("{}{}", prefix, to_version);
     let to_name = to_name;
+    // println!("from: {}", from_name);
+    // println!("to: {}", to_name);
     (from_name, to_name)
 }
 
@@ -587,8 +599,8 @@ fn parse_git_url(url: &String) -> Option<(&str, &str, &str)> {
 
 fn get_changelog_string(
     baseurl: String,
-    to_name: String,
     from_name: String,
+    to_name: String,
     commit_map: HashMap<String, Vec<Commit>>,
     contributors: HashMap<String, Author>,
 ) -> String {
@@ -778,6 +790,8 @@ fn get_range<'a>(
     let from_commit = get_from_commit(repo, from);
     let to_obj = repo.revparse_single(to.as_str()).unwrap();
     let to_commit = to_obj.as_commit().unwrap().clone();
+    // println!("from: {:?}", from_commit);
+    // println!("to: {:?}", to_commit);
     if from_commit.id() == to_commit.id() {
         return Err("No commits between from and to.".into());
     }
@@ -786,6 +800,9 @@ fn get_range<'a>(
     walker.push_range(format!("{}..{}", from_commit.id(), to_commit.id()).as_str())?;
 
     let mut commits = Vec::new();
+    if !c2t.contains_key(from_commit.id().to_string().as_str()) {
+        commits.push(from_commit);
+    }
     for id in walker {
         let id = id.unwrap().to_string();
         if c2t.contains_key(id.as_str()) {
@@ -793,7 +810,6 @@ fn get_range<'a>(
             commits.push(commit);
         }
     }
-    commits.push(from_commit);
     let to_tag = c2t.get(to_commit.id().to_string().as_str());
     if None == to_tag {
         commits.push(to_commit);
